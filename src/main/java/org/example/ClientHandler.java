@@ -112,13 +112,11 @@ public final class ClientHandler implements Runnable {
             long prev = last.getAndSet(cur);
             long dBytes = cur - prev;
             long window = TimeUnit.SECONDS.toNanos(3);
-            if (tAll < window) window = Math.max(1, tAll);
 
             double inst = dBytes * 1e9 / (double) window;
             double avg  = cur    * 1e9 / (double) Math.max(1, tAll);
 
-            System.out.printf("[%s] %s | t=%.2fs | inst=%.0f B/s | avg=%.0f B/s | %d/%d%n",
-                    clientId, fileName, tAll / 1e9, inst, avg, cur, expect);
+            System.out.printf("["+clientId+"] "+fileName+" | t="+tAll / 1e9+" | inst="+inst+" B/s | avg="+avg+" B/s | "+cur+expect+"%n");
             printed.set(true);
         }
     }

@@ -29,7 +29,7 @@ public class Server {
         };
         this.pool = new ThreadPoolExecutor(
                 WORKERS, WORKERS,
-                0L, TimeUnit.SECONDS,
+                1, TimeUnit.SECONDS,
                 new ArrayBlockingQueue<>(QUEUE),
                 tf,
                 new ThreadPoolExecutor.AbortPolicy()
@@ -48,7 +48,7 @@ public class Server {
     }
 
     public void serve() throws IOException {
-        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("127.0.0.1"))) {
+        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("127.0.0.123"))) {
             ss.setReuseAddress(true);
             System.out.println("Listening on " + ss.getInetAddress() + ":" + port + " -> " + uploads);
             while (true) {
@@ -57,7 +57,6 @@ public class Server {
                 try {
                     pool.execute(new ClientHandler(s, sched, uploads));
                 } catch (RejectedExecutionException rex) {
-                    // перегрузка: аккуратно закрываем
                     try { s.close(); } catch (IOException ignore) {}
                 }
             }

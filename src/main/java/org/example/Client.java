@@ -18,9 +18,8 @@ public class Client {
 
     public static void main(String[] args) throws IOException {
 
-        String host = "127.0.0.1";
+        String host = "127.0.0.123";
         int port = 5000;
-//        Path path = "";
         Path path = Paths.get("C:\\Users\\PC\\IdeaProjects\\slab-2\\src\\uploads\\"+"123.mp4");
 
         if (!Files.isRegularFile(path)) {
@@ -60,9 +59,9 @@ public class Client {
 
             int status = in.read();
             if (status == OK) {
-                System.out.println("OK: передача успешна");
+                System.out.println("OK: the transfer is successful");
             } else {
-                System.out.println("FAIL: сервер сообщил об ошибке");
+                System.out.println("FAIL: the server reported an error");
                 System.exit(1);
             }
         }
