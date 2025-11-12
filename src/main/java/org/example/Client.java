@@ -11,16 +11,17 @@ import java.nio.file.StandardOpenOption;
 
 public class Client {
     private static final int BUFFER_LENGTH =  256 * 1024;
-    private static final int MAGIC = 0x4567879;
+    private static final int MAGIC = 0x12345678;
+    private static final byte OK = 0x01, FAIL = 0x00;
 
     private static final int MAX_NAME_BYTES = 16;
 
     public static void main(String[] args) throws IOException {
 
         String host = "127.0.0.1";
-        int port = 123455;
+        int port = 5000;
 //        Path path = "";
-        Path path = Paths.get("uploads/" + host + "_" + port + ".png");
+        Path path = Paths.get("C:\\Users\\PC\\IdeaProjects\\slab-2\\src\\uploads\\"+"123.mp4");
 
         if (!Files.isRegularFile(path)) {
             System.err.println("Not a file: " + path);
@@ -58,7 +59,7 @@ public class Client {
             out.flush();
 
             int status = in.read();
-            if (status == 0x01) {
+            if (status == OK) {
                 System.out.println("OK: передача успешна");
             } else {
                 System.out.println("FAIL: сервер сообщил об ошибке");

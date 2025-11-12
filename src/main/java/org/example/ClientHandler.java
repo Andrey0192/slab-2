@@ -2,159 +2,124 @@ package org.example;
 
 import java.io.*;
 import java.net.Socket;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
+public final class ClientHandler implements Runnable {
+    private static final int BUF = 256 * 1024;
+    private static final int MAX_NAME_BYTES = 4096;
+    private static final long MAX_FILE_SIZE = 1_000_000_000_000L;
+    private static final int MAGIC = 0x12345678;
+    private static final byte OK = 0x01, FAIL = 0x00;
 
-public class ClientHandler implements Runnable {
-    AtomicLong last = new AtomicLong(0);
-
-    private static final int EXPIRE_MS = 10_000;
+    private final Socket sock;
     private final ScheduledExecutorService sched;
-    AtomicBoolean printed = new AtomicBoolean(false);
-    long startNs = System.nanoTime();
+    private final Path uploadsRoot;
 
-
-    private static final int BUFFER_LENGTH = 1024;
-    private static final int OK = 0x01;
-    private static final int NO = 0x00;
-
-    private final String clientId;
-    private static final int HEART_BEAT_MS = 3_000;
-
-    public Socket socket;
-    private final DataOutputStream out;
-    private final DataInputStream in;
-    private boolean running = true;
-
-    AtomicLong total = new AtomicLong(0);
-
-
-
-
-
-
-public ClientHandler(Socket socket, ScheduledExecutorService sched) throws IOException {
-        this.socket = socket;
-        this.clientId = socket.getRemoteSocketAddress().toString();
+    public ClientHandler(Socket sock, ScheduledExecutorService sched, Path uploadsRoot) {
+        this.sock = sock;
         this.sched = sched;
-        try {
-            socket.setSoTimeout(EXPIRE_MS);
-            in =new DataInputStream(socket.getInputStream());
-            out = new DataOutputStream(socket.getOutputStream());
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            try {
-                socket.close();
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        }));
-
-        while (socket.isConnected() && running) {
-            receiveFile();
-        }
+        this.uploadsRoot = uploadsRoot;
     }
 
-    @Override
-    public void run() {
+    @Override public void run() {
+        String clientId = sock.getRemoteSocketAddress().toString();
+        AtomicLong total = new AtomicLong(0);
+        AtomicLong last  = new AtomicLong(0);
+        AtomicBoolean printed = new AtomicBoolean(false);
+        long startNs = System.nanoTime();
 
-    }
+        try (Socket s = sock;
+             DataInputStream in  = new DataInputStream(new BufferedInputStream(s.getInputStream(), BUF));
+             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 8))) {
 
-    public void receiveFile() throws IOException {
+            int magic = in.readInt();
+            if (magic != MAGIC) throw new IOException("bad magic");
+            int nameLen = in.readInt();
+            if (nameLen <= 0 || nameLen > MAX_NAME_BYTES) throw new IOException("bad nameLen");
+            long fileSize = in.readLong();
+            if (fileSize < 0 || fileSize > MAX_FILE_SIZE) throw new IOException("bad fileSize");
 
-        int typeFile = in.readInt();
-        int nameLen = in.readInt();
-        long fileSize = in.readLong();
-        byte[] nameBytes = new byte[nameLen];
-        in.readFully(nameBytes, 0, nameLen);
-        String fileName = new String(nameBytes);
+            byte[] nameBytes = new byte[nameLen];
+            in.readFully(nameBytes);
+            String rawName = new String(nameBytes, StandardCharsets.UTF_8);
 
-        Path path = Paths.get("uploads");
-        Path full = path.resolve(fileName).normalize();
-        byte[] buffer = new byte[BUFFER_LENGTH];
-        boolean ok = false;
-        SpeedPrinter sp = new SpeedPrinter(clientId, fileName, total, last, startNs, fileSize, printed);
+            String name = Paths.get(rawName).getFileName().toString();
+            Path target = uploadsRoot.resolve(name).normalize();
 
-        ScheduledFuture<?> tick = sched.scheduleAtFixedRate(sp, 3, 3, TimeUnit.SECONDS);
-        try (OutputStream fos = Files.newOutputStream(full, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-            long rest = fileSize;
-            while (rest > 0) {
-                int want = (int) Math.min(BUFFER_LENGTH, rest);
-                int read = in.read(buffer, 0, want);
-                if (read == -1) {
-                    System.out.println("Read EOF");
-                    break;
+
+            SpeedPrinter sp = new SpeedPrinter(clientId, rawName, total, last, startNs, fileSize, printed);
+            sched.scheduleAtFixedRate(sp, 3, 3, TimeUnit.SECONDS);
+
+            boolean ok = false;
+            try (OutputStream fout = Files.newOutputStream(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                byte[] buf = new byte[BUF];
+                long remain = fileSize;
+                while (remain > 0) {
+                    int want = (int) Math.min(buf.length, remain);
+                    int r = in.read(buf, 0, want);
+                    if (r == -1) break;
+                    fout.write(buf, 0, r);
+                    total.addAndGet(r);
+                    remain -= r;
                 }
-                fos.write(buffer, 0, read);
-                total.addAndGet(read);
-                rest -= want;
+                fout.flush();
+                ok = (total.get() == fileSize);
+            } catch (Throwable t) {
+                try { Files.deleteIfExists(target); } catch (IOException ignore) {}
+                throw t;
+            } finally {
+                if (!printed.get()) sp.printNow();
             }
-            fos.flush();
-            ok = (total.get() == fileSize);
 
-            if (ok) {
-                out.writeInt(OK);
-            } else {
-                out.writeByte(NO);
-            }
+            out.writeByte(ok ? OK : FAIL);
             out.flush();
-            if (!ok) throw new IOException("Size mismatch: got " + total.get() + " expected " + fileSize);
+
+            if (!ok) throw new IOException("size mismatch: got " + total.get() + " expected " + fileSize);
 
         } catch (Throwable e) {
-            System.err.println("[" + clientId + "] error: " + e.getMessage());
+            System.err.println("[" + clientId + "] " + e.getMessage());
         }
     }
-}
 
-class SpeedPrinter implements Runnable {
-    private final String clientId;
-    private final String fileName;
-    private final AtomicLong total;
-    private final AtomicLong last;
-    private final long startNs;
-    private final long expect;
-    private final AtomicBoolean printed;
 
-    SpeedPrinter(String clientId, String fileName, AtomicLong total, AtomicLong last,
-                 long startNs, long expect, AtomicBoolean printed) {
-        this.clientId = clientId;
-        this.fileName = fileName;
-        this.total = total;
-        this.last = last;
-        this.startNs = startNs;
-        this.expect = expect;
-        this.printed = printed;
-    }
+    static final class SpeedPrinter implements Runnable {
+        private final String clientId, fileName;
+        private final AtomicLong total, last;
+        private final long startNs, expect;
+        private final AtomicBoolean printed;
 
-    @Override public void run() { printNow(); }
+        SpeedPrinter(String clientId, String fileName, AtomicLong total, AtomicLong last,
+                     long startNs, long expect, AtomicBoolean printed) {
+            this.clientId = clientId;
+            this.fileName = fileName;
+            this.total = total;
+            this.last = last;
+            this.startNs = startNs;
+            this.expect = expect;
+            this.printed = printed;
+        }
 
-    void printNow() {
-        long now = System.nanoTime();
-        long tAll = now - startNs;
-        long cur = total.get();
-        long prev = last.getAndSet(cur);
-        long dBytes = cur - prev;
-        long dTime = TimeUnit.SECONDS.toNanos(3);
-        if (tAll < dTime) dTime = (tAll == 0 ? 1 : tAll);
+        @Override public void run() { printNow(); }
 
-        double instBps = dBytes * 1e9 / (double) dTime;
-        double avgBps  = cur    * 1e9 / (double) Math.max(1, tAll);
+        void printNow() {
+            long now = System.nanoTime();
+            long tAll = now - startNs;
+            long cur = total.get();
+            long prev = last.getAndSet(cur);
+            long dBytes = cur - prev;
+            long window = TimeUnit.SECONDS.toNanos(3);
+            if (tAll < window) window = Math.max(1, tAll);
 
-        System.out.printf(
-                "[%s] %s | t=%.2fs | inst=%.0f B/s | avg=%.0f B/s | %d/%d bytes%n",
-                clientId, fileName, tAll / 1e9, instBps, avgBps, cur, expect
-        );
-        printed.set(true);
+            double inst = dBytes * 1e9 / (double) window;
+            double avg  = cur    * 1e9 / (double) Math.max(1, tAll);
+
+            System.out.printf("[%s] %s | t=%.2fs | inst=%.0f B/s | avg=%.0f B/s | %d/%d%n",
+                    clientId, fileName, tAll / 1e9, inst, avg, cur, expect);
+            printed.set(true);
+        }
     }
 }

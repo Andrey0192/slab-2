@@ -1,50 +1,71 @@
 package org.example;
 
-import java.io.*;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.io.IOException;
+import java.net.*;
+import java.nio.file.*;
+import java.util.concurrent.*;
 
 public class Server {
-    private int port;
-    private ScheduledExecutorService sched;
-    InetAddress address ;
-    
+    private static final int WORKERS = 10;
+    private static final int QUEUE   = 50;
+    private static final int BACKLOG = 100;
+    private static final int SO_TIMEOUT_MS = 30_000;
 
-    Server () {
-        try (ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(10, r -> {
-            Thread thread = new Thread(r);
-            thread.setName("Thread-" + thread.getId() + "-Server");
-            thread.start();
-            return thread;
-        })) {
-            try {
-                address = InetAddress.getByName("localhost");
-                try (ServerSocket serverSocket = new ServerSocket(port, 10, address)) {
-                    Socket socket = serverSocket.accept();
-                    ClientHandler clientHandler = new ClientHandler(socket, sched);
-                    executor.execute(clientHandler);
-                }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-            Runtime.getRuntime().addShutdownHook(new Thread(executor::shutdown));
-        }
-        this.sched = Executors.newScheduledThreadPool(5, r -> {
-            Thread t = new Thread(r, "speed-reporter");
+    private final int port;
+    private final Path uploads;
+    private final ExecutorService pool;
+    private final ScheduledExecutorService sched;
+
+    public Server(int port) throws IOException {
+        this.port = port;
+        this.uploads = Paths.get("uploads").toAbsolutePath().normalize();
+        Files.createDirectories(uploads);
+
+        ThreadFactory tf = r -> {
+            Thread t = new Thread(r);
+            t.setName("client-" + t.getId());
+            t.setDaemon(true);
+            return t;
+        };
+        this.pool = new ThreadPoolExecutor(
+                WORKERS, WORKERS,
+                0L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(QUEUE),
+                tf,
+                new ThreadPoolExecutor.AbortPolicy()
+        );
+        this.sched = Executors.newScheduledThreadPool(2, r -> {
+            Thread t = new Thread(r);
+            t.setName("speed-reporter");
             t.setDaemon(true);
             return t;
         });
 
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            pool.shutdownNow();
+            sched.shutdownNow();
+        }));
     }
 
-    public static void main(String[] args) {
-        int port = 12345;
-        int backlog = 10;
-        Server server = new Server();
+    public void serve() throws IOException {
+        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("127.0.0.1"))) {
+            ss.setReuseAddress(true);
+            System.out.println("Listening on " + ss.getInetAddress() + ":" + port + " -> " + uploads);
+            while (true) {
+                Socket s = ss.accept();
+                s.setSoTimeout(SO_TIMEOUT_MS);
+                try {
+                    pool.execute(new ClientHandler(s, sched, uploads));
+                } catch (RejectedExecutionException rex) {
+                    // перегрузка: аккуратно закрываем
+                    try { s.close(); } catch (IOException ignore) {}
+                }
+            }
+        }
+    }
 
+    public static void main(String[] args) throws Exception {
+        int port = 5000;
+        new Server(port).serve();
     }
 }
