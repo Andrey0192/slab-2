@@ -34,7 +34,7 @@ public final class ClientHandler implements Runnable {
 
         try (Socket s = sock;
              DataInputStream in  = new DataInputStream(new BufferedInputStream(s.getInputStream(), BUF));
-             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 8))) {
+             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()))) {
 
             int magic = in.readInt();
             if (magic != MAGIC) throw new IOException("bad magic");
@@ -49,7 +49,6 @@ public final class ClientHandler implements Runnable {
 
             String name = Paths.get(rawName).getFileName().toString();
             Path target = uploadsRoot.resolve(name).normalize();
-
 
             SpeedPrinter sp = new SpeedPrinter(clientId, rawName, total, last, startNs, fileSize, printed);
             sched.scheduleAtFixedRate(sp, 3, 3, TimeUnit.SECONDS);

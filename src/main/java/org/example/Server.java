@@ -37,7 +37,6 @@ public class Server {
         this.sched = Executors.newScheduledThreadPool(2, r -> {
             Thread t = new Thread(r);
             t.setName("speed-reporter");
-            t.setDaemon(true);
             return t;
         });
 
