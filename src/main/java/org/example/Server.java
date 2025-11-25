@@ -23,7 +23,7 @@ public class Server {
 
         ThreadFactory tf = r -> {
             Thread t = new Thread(r);
-            t.setName("client-" + t.getId());
+            t.setName("client-" + t.getName());
             t.setDaemon(true);
             return t;
         };
