@@ -47,7 +47,7 @@ public class Server {
     }
 
     public void serve() throws IOException {
-        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("127.0.0.123"))) {
+        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("26.242.159.56"))) {
             ss.setReuseAddress(true);
             System.out.println("Listening on " + ss.getInetAddress() + ":" + port + " -> " + uploads);
             while (true) {

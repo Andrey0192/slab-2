@@ -18,9 +18,11 @@ public class Client {
 
     public static void main(String[] args) throws IOException {
 
-        String host = "127.0.0.123";
+        String host = "26.89.21.147";
         int port = 5000;
-        Path path = Paths.get("C:\\Users\\PC\\IdeaProjects\\slab-2\\src\\uploads\\"+"123.mp4");
+        Path uploads = Paths.get( "uploads").toAbsolutePath().normalize();
+        Files.createDirectories(uploads);
+        Path path = uploads.resolve(Paths.get("uploads", "123.mp4")).normalize();
 
         if (!Files.isRegularFile(path)) {
             System.err.println("Not a file: " + path);
