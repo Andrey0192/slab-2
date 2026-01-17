@@ -1,78 +1,144 @@
 package org.example;
 
 import java.io.IOException;
-import java.net.*;
-import java.nio.file.*;
-import java.util.concurrent.*;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketAddress;
+import java.net.SocketException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
-public class Server {
+public final class Server implements AutoCloseable {
     private static final int WORKERS = 10;
-    private static final int QUEUE   = 50;
+    private static final int QUEUE_CAPACITY = 50;
     private static final int BACKLOG = 100;
+
     private static final int SO_TIMEOUT_MS = 30_000;
 
     private final int port;
-    private final Path uploads;
-    private final ExecutorService pool;
-    private final ScheduledExecutorService sched;
+    private final InetAddress bindAddress; // null => 0.0.0.0
+    private final Path uploadsRoot;
 
-    public Server(int port) throws IOException {
+    private final ThreadPoolExecutor pool;
+    private final ScheduledExecutorService scheduler;
+
+    private final AtomicBoolean running = new AtomicBoolean(true);
+    private volatile ServerSocket serverSocket;
+
+    public static Server createDefault(int port, InetAddress bindAddress) throws IOException {
+        return new Server(port, bindAddress, Paths.get("uploads"));
+    }
+
+    public Server(int port, InetAddress bindAddress, Path uploadsDir) throws IOException {
         this.port = port;
-        this.uploads = Paths.get("uploads").toAbsolutePath().normalize();
-        Files.createDirectories(uploads);
+        this.bindAddress = bindAddress;
 
+        this.uploadsRoot = uploadsDir.toAbsolutePath().normalize();
+        Files.createDirectories(this.uploadsRoot);
+
+        AtomicInteger n = new AtomicInteger(1);
         ThreadFactory tf = r -> {
-            Thread t = new Thread(r);
-            t.setName("client-" + t.getName());
-            t.setDaemon(true);
+            Thread t = new Thread(r, "client-handler-" + n.getAndIncrement());
+            t.setDaemon(false);
             return t;
         };
+
         this.pool = new ThreadPoolExecutor(
                 WORKERS, WORKERS,
-                1, TimeUnit.SECONDS,
-                new ArrayBlockingQueue<>(QUEUE),
+                0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<>(QUEUE_CAPACITY),
                 tf,
                 new ThreadPoolExecutor.AbortPolicy()
         );
-        this.sched = Executors.newScheduledThreadPool(2, r -> {
-            Thread t = new Thread(r);
-            t.setName("speed-reporter");
+
+        this.scheduler = Executors.newScheduledThreadPool(2, r -> {
+            Thread t = new Thread(r, "speed-reporter");
+            t.setDaemon(true);
             return t;
         });
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            // myAtomicStopVariable.set(true)
-            // ss.close()
-            pool.shutdownNow();
-            sched.shutdownNow();
-        }));
+            try {
+                close();
+            } catch (Exception ignored) {
+            }
+        }, "shutdown-hook"));
     }
 
-    public void serve() throws IOException { // "0.0.0.0"
-        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("26.242.159.56"))) { // iface picking
-            ss.setReuseAddress(true);
-            System.out.println("Listening on " + ss.getInetAddress() + ":" + port + " -> " + uploads);
-            while (true) { // exiting out of while (true)????
-                Socket s = ss.accept();
-                s.setSoTimeout(SO_TIMEOUT_MS);
-                try {
-                    var c = new ClientHandler(...);
+    public void serve() throws IOException {
+        ServerSocket ss = new ServerSocket();
+        this.serverSocket = ss;
 
+        SocketAddress bind = (bindAddress == null)
+                ? new InetSocketAddress(port)
+                : new InetSocketAddress(bindAddress, port);
+
+        ss.setReuseAddress(true);
+        ss.bind(bind, BACKLOG);
+
+        System.out.println("Listening on " + ss.getLocalSocketAddress() + " -> " + uploadsRoot);
+
+        while (running.get()) {
+            try {
+                Socket s = ss.accept();
+                configure(s);
+
+                var c = new ClientHandler(s, uploadsRoot, scheduler);
+                try {
                     pool.execute(c::start);
-                    pool.execute(new ClientHandler(s, sched, uploads));
-                } catch (RejectedExecutionException rex) { // haram
-                    try { s.close(); } catch (IOException ignore) {} // better to print all exceptions
-                    // slf4j + logback (better)
-                    // java.util.Logger
+                } catch (RejectedExecutionException rex) {
+                    safeClose(s);
+                    System.err.println("Rejected client " + s.getRemoteSocketAddress() + " (server overloaded)");
                 }
+
+            } catch (SocketException se) {
+                if (!running.get()) break;
+                System.err.println("Server socket error: " + se.getMessage());
+            } catch (IOException ioe) {
+                if (!running.get()) break;
+                System.err.println("Accept I/O error: " + ioe.getMessage());
             }
         }
     }
 
-    // gradle modules
-    // how much main functions????
-    public static void main(String[] args) throws Exception {
-        int port = 5000; // hard coded???? not args????
-        new Server(port).serve();
+    private static void configure(Socket s) throws SocketException {
+        s.setSoTimeout(SO_TIMEOUT_MS);
+        s.setTcpNoDelay(true);
+        s.setKeepAlive(true);
+    }
+
+    private static void safeClose(Socket s) {
+        try {
+            s.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    @Override
+    public void close() throws Exception {
+        running.set(false);
+
+        ServerSocket ss = serverSocket;
+        if (ss != null) {
+            try {
+                ss.close();
+            } catch (IOException ignored) {
+            }
+        }
+
+        pool.shutdownNow();
+        scheduler.shutdownNow();
     }
 }

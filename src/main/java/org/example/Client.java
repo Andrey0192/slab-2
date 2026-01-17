@@ -1,72 +1,90 @@
 package org.example;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 
-public class Client {
-    private static final int BUFFER_LENGTH =  256 * 1024;
-    private static final int MAGIC = 0x12345678;
-    private static final byte OK = 0x01, FAIL = 0x00;
+public final class Client {
+    private static final int CONNECT_TIMEOUT_MS = 10_000;
+    private static final int SO_TIMEOUT_MS = 60_000;
 
-    private static final int MAX_NAME_BYTES = 16;
-
-    public static void main(String[] args) throws IOException {
-
-        String host = "10.163.123.205";
-        int port = 5000;
-        Path path = Paths.get("C:\\Users\\PC\\IdeaProjects\\slab-2\\src\\uploads\\"+"123.mp4");
-
-//        if (!Files.isRegularFile(path)) {
-//            System.err.println("Not a file: " + path);
-//            System.exit(3);
-//        }
-        long size = Files.size(path);
-//        if (size < 0) {
-//            System.err.println("Bad size");
-//            System.exit(3);
-//        }
-        byte[] nameBytes = path.getFileName().toString().getBytes(StandardCharsets.UTF_8);
-//        if (nameBytes.length == 0 || nameBytes.length > MAX_NAME_BYTES) {
-//            System.err.println("File name must be 1.." + MAX_NAME_BYTES + " bytes in UTF-8");
-//            System.exit(3);
-//        }
-        try (Socket s = new Socket(host, port);
-             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), BUFFER_LENGTH));
-             DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 8));
-             InputStream fin = new BufferedInputStream(Files.newInputStream(path), BUFFER_LENGTH)) {
+    private Client() {}
 
 
-            out.writeInt(MAGIC);
-            out.writeInt(nameBytes.length);
-            out.writeLong(size);
-            out.write(nameBytes);
-
-            byte[] buf = new byte[BUFFER_LENGTH];
-            long remain = size;
-            while (remain > 0) {
-                int r = fin.read(buf, 0, (int) Math.min(buf.length, remain));
-                if (r == -1) break;
-                out.write(buf, 0, r);
-                remain -= r;
-            }
-            out.flush();
-
-            int status = in.read();
-            if (status == OK) {
-                System.out.println("OK: the transfer is successful");
-
+    public static int sendFile(Path file, String host, int port) {
+        try {
+            boolean ok = doSend(file, host, port);
+            if (ok) {
+                System.out.println("OK: transfer successful");
+                return 0;
             } else {
-                System.out.println("FAIL: the server reported an error");
-                System.exit(1);
+                System.out.println("FAIL: server reported an error");
+                return 1;
             }
+        } catch (ProtocolException e) {
+            System.err.println("Bad input/protocol: " + e.getMessage());
+            return 2;
+        } catch (IOException e) {
+            System.err.println("Network/I/O error: " + e.getMessage());
+            return 2;
         }
     }
 
+    private static boolean doSend(Path file, String host, int port) throws IOException, ProtocolException {
+        Path path = file.toAbsolutePath().normalize();
 
+        if (!Files.isRegularFile(path)) {
+            throw new ProtocolException("Not a regular file: " + path);
+        }
+
+        long size = Files.size(path);
+        if (size < 0 || size > Protocol.MAX_FILE_SIZE) {
+            throw new ProtocolException("Bad file size: " + size);
+        }
+
+        byte[] nameBytes = path.getFileName().toString().getBytes(StandardCharsets.UTF_8);
+        if (nameBytes.length == 0 || nameBytes.length > Protocol.MAX_NAME_BYTES) {
+            throw new ProtocolException("File name must be 1.." + Protocol.MAX_NAME_BYTES + " bytes in UTF-8");
+        }
+
+        byte[] buf = new byte[Protocol.IO_BUFFER_SIZE];
+
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+            s.setSoTimeout(SO_TIMEOUT_MS);
+            s.setTcpNoDelay(true);
+
+            try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), Protocol.IO_BUFFER_SIZE));
+                 DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 8));
+                 InputStream fin = new BufferedInputStream(Files.newInputStream(path, StandardOpenOption.READ), Protocol.IO_BUFFER_SIZE)) {
+
+                out.writeInt(nameBytes.length);
+                out.writeLong(size);
+                out.write(nameBytes);
+
+                long remain = size;
+                while (remain > 0) {
+                    int want = (int) Math.min(buf.length, remain);
+                    int r = fin.read(buf, 0, want);
+                    if (r == -1) throw new EOFException("Unexpected EOF while reading local file");
+                    out.write(buf, 0, r);
+                    remain -= r;
+                }
+                out.flush();
+
+                int status = in.read();
+                return status == Protocol.OK;
+            }
+        }
+    }
 }

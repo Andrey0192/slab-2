@@ -1,134 +1,184 @@
 package org.example;
 
-import java.io.*;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.concurrent.*;
+import java.nio.file.FileAlreadyExistsException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-public final class ClientHandler implements Runnable {
-    private static final int BUF = 256 * 1024;
-    private static final int MAX_NAME_BYTES = 4096;
-    private static final long MAX_FILE_SIZE = 1_000_000_000_000L;
-    private static final int MAGIC = 0x12345678; // why?
-    private static final byte OK = 0x01, FAIL = 0x00;
+public final class ClientHandler {
+    private static final int MAX_COLLISION_ATTEMPTS = 1000;
 
-    private final Socket sock;
-    private final ScheduledExecutorService sched;
+    private final Socket socket;
     private final Path uploadsRoot;
-    // private final StatsCollector sc;
+    private final ScheduledExecutorService scheduler;
 
-    public ClientHandler(Socket sock, ScheduledExecutorService sched, Path uploadsRoot) {
-        this.sock = sock;
-        this.sched = sched;
+    public ClientHandler(Socket socket, Path uploadsRoot, ScheduledExecutorService scheduler) {
+        this.socket = socket;
         this.uploadsRoot = uploadsRoot;
+        this.scheduler = scheduler;
     }
 
     public void start() {
-
+        run();
     }
 
-    @Override public void run() {
-        String clientId = sock.getRemoteSocketAddress().toString();
-        AtomicLong total = new AtomicLong(0);
-        AtomicLong last  = new AtomicLong(0);
-        AtomicBoolean printed = new AtomicBoolean(false);
-        long startNs = System.nanoTime();
+    private void run() {
+        final String clientId = String.valueOf(socket.getRemoteSocketAddress());
+        final byte[] buf = new byte[Protocol.IO_BUFFER_SIZE];
 
-        // sc.wroteInfo()
-        // ... handling
-        // sc.wroteInfo()
-        // sc.finished()
-        // sc.myConcurrentHashMap<>();
+        try (Socket s = socket;
+             DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), Protocol.IO_BUFFER_SIZE));
+             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), 64 * 1024))) {
 
-        try (Socket s = sock;
-             DataInputStream in  = new DataInputStream(new BufferedInputStream(s.getInputStream(), BUF));
-             DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()))) {
-
-            int magic = in.readInt();
-            if (magic != MAGIC) throw new IOException("bad magic"); // Business exception, not IO IllegalStateException, IllegalArgumentException
-            // We are not communication with os directly
-            int nameLen = in.readInt();
-            if (nameLen <= 0 || nameLen > MAX_NAME_BYTES) throw new IOException("bad nameLen"); // same as upper
-            long fileSize = in.readLong();
-            if (fileSize < 0 || fileSize > MAX_FILE_SIZE) throw new IOException("bad fileSize"); // same as upper
-
-            byte[] nameBytes = new byte[nameLen];
-            in.readFully(nameBytes);
-            String rawName = new String(nameBytes, StandardCharsets.UTF_8);
-
-            String name = Paths.get(rawName).getFileName().toString();
-            Path target = uploadsRoot.resolve(name).normalize();
-
-            SpeedPrinter sp = new SpeedPrinter(clientId, rawName, total, last, startNs, fileSize, printed);
-            sched.scheduleAtFixedRate(sp, 3, 3, TimeUnit.SECONDS); // why not cleaning!!!!!
-
-            boolean ok = false;
-            try (OutputStream fout = Files.newOutputStream(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                byte[] buf = new byte[BUF]; // better use 1 buffer
-                long remain = fileSize;
-                while (remain > 0) {
-                    int want = (int) Math.min(buf.length, remain);
-                    int r = in.read(buf, 0, want);
-                    if (r == -1) break;
-                    fout.write(buf, 0, r);
-                    total.addAndGet(r);
-                    remain -= r;
-                }
-                fout.flush();
-                ok = (total.get() == fileSize);
-            } catch (Throwable t) { // StackOverflowError, OutOfMemoryError??????
-                try { Files.deleteIfExists(target); } catch (IOException ignore) {} // logging of exception????
-                throw t;
-            } finally {
-                if (!printed.get()) sp.printNow();
+            try {
+                boolean ok = handleOneClient(clientId, in, buf);
+                out.writeByte(ok ? Protocol.OK : Protocol.FAIL);
+                out.flush();
+            } catch (ProtocolException e) {
+                safeWriteStatus(out, Protocol.FAIL);
+                System.err.println("[" + clientId + "] protocol error: " + e.getMessage());
+            } catch (IOException e) {
+                safeWriteStatus(out, Protocol.FAIL);
+                System.err.println("[" + clientId + "] I/O error: " + e.getMessage());
             }
 
-            out.writeByte(ok ? OK : FAIL);
-            out.flush();
-
-            if (!ok) throw new IOException("size mismatch: got " + total.get() + " expected " + fileSize); // same as upper
-
-        } catch (Throwable e) { // OOM, StackOverflow
-            System.err.println("[" + clientId + "] " + e.getMessage());
+        } catch (IOException e) {
+            System.err.println("[" + clientId + "] connection error: " + e.getMessage());
         }
     }
 
+    private boolean handleOneClient(String clientId, DataInputStream in, byte[] buf)
+            throws IOException, ProtocolException {
 
-    static final class SpeedPrinter implements Runnable {
-        private final String clientId, fileName;
-        private final AtomicLong total, last;
-        private final long startNs, expect;
-        private final AtomicBoolean printed;
-
-        SpeedPrinter(String clientId, String fileName, AtomicLong total, AtomicLong last,
-                     long startNs, long expect, AtomicBoolean printed) {
-            this.clientId = clientId;
-            this.fileName = fileName;
-            this.total = total;
-            this.last = last;
-            this.startNs = startNs;
-            this.expect = expect;
-            this.printed = printed;
+        int nameLen = in.readInt();
+        if (nameLen <= 0 || nameLen > Protocol.MAX_NAME_BYTES) {
+            throw new ProtocolException("bad nameLen: " + nameLen);
         }
 
-        @Override public void run() { printNow(); }
+        long fileSize = in.readLong();
+        if (fileSize < 0 || fileSize > Protocol.MAX_FILE_SIZE) {
+            throw new ProtocolException("bad fileSize: " + fileSize);
+        }
 
-        void printNow() {
-            long now = System.nanoTime();
-            long tAll = now - startNs;
-            long cur = total.get();
-            long prev = last.getAndSet(cur);
-            long dBytes = cur - prev;
-            long window = TimeUnit.SECONDS.toNanos(3);
+        byte[] nameBytes = new byte[nameLen];
+        in.readFully(nameBytes);
 
-            double inst = dBytes * 1e9 / (double) window;
-            double avg  = cur    * 1e9 / (double) Math.max(1, tAll);
+        String rawName = new String(nameBytes, StandardCharsets.UTF_8);
+        String safeName = FileNameUtil.sanitize(rawName);
 
-            System.out.printf("["+clientId+"] "+fileName+" | t="+tAll / 1e9+" | inst="+inst+" B/s | avg="+avg+" B/s | "+cur+expect+"%n");
-            printed.set(true);
+        OpenedFile of = openUniqueFile(safeName);
+
+        AtomicLong total = new AtomicLong(0);
+        AtomicBoolean printed = new AtomicBoolean(false);
+
+        SpeedReporter reporter = new SpeedReporter(clientId, of.storedName, fileSize, total, printed);
+        ScheduledFuture<?> future = scheduler.scheduleAtFixedRate(
+                reporter,
+                Protocol.SPEED_PERIOD_SECONDS,
+                Protocol.SPEED_PERIOD_SECONDS,
+                TimeUnit.SECONDS
+        );
+
+        boolean ok = false;
+        try (OpenedFile opened = of;
+             OutputStream fileOut = new BufferedOutputStream(opened.out, Protocol.IO_BUFFER_SIZE)) {
+
+            long remain = fileSize;
+            while (remain > 0) {
+                int want = (int) Math.min(buf.length, remain);
+                int r = in.read(buf, 0, want);
+                if (r == -1) {
+                    throw new EOFException("unexpected end of stream");
+                }
+                fileOut.write(buf, 0, r);
+                total.addAndGet(r);
+                remain -= r;
+            }
+            fileOut.flush();
+
+            ok = (total.get() == fileSize);
+            return ok;
+
+        } finally {
+            future.cancel(false);
+
+            if (!printed.get()) {
+                reporter.printNow();
+            }
+
+            if (!ok) {
+                try {
+                    Files.deleteIfExists(of.path);
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private void safeWriteStatus(DataOutputStream out, byte status) {
+        try {
+            out.writeByte(status);
+            out.flush();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private OpenedFile openUniqueFile(String safeName) throws IOException, ProtocolException {
+        String base = safeName;
+        String ext = "";
+
+        int dot = safeName.lastIndexOf('.');
+        if (dot > 0 && dot < safeName.length() - 1) {
+            base = safeName.substring(0, dot);
+            ext = safeName.substring(dot);
+        }
+
+        for (int i = 0; i < MAX_COLLISION_ATTEMPTS; i++) {
+            String candidateName = (i == 0) ? safeName : (base + "_" + i + ext);
+
+            Path candidate = uploadsRoot.resolve(candidateName).normalize();
+            if (!candidate.startsWith(uploadsRoot)) {
+                throw new ProtocolException("bad filename (path traversal)");
+            }
+
+            try {
+                OutputStream os = Files.newOutputStream(candidate, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+                return new OpenedFile(candidate, candidateName, os);
+            } catch (java.nio.file.FileAlreadyExistsException e) {
+            }
+        }
+
+        throw new IOException("too many name collisions in uploads directory");
+    }
+
+    private static final class OpenedFile implements AutoCloseable {
+        final Path path;
+        final String storedName;
+        final OutputStream out;
+
+        OpenedFile(Path path, String storedName, OutputStream out) {
+            this.path = path;
+            this.storedName = storedName;
+            this.out = out;
+        }
+
+        @Override
+        public void close() throws IOException {
+            out.close();
         }
     }
 }
