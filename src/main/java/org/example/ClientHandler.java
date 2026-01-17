@@ -12,17 +12,22 @@ public final class ClientHandler implements Runnable {
     private static final int BUF = 256 * 1024;
     private static final int MAX_NAME_BYTES = 4096;
     private static final long MAX_FILE_SIZE = 1_000_000_000_000L;
-    private static final int MAGIC = 0x12345678;
+    private static final int MAGIC = 0x12345678; // why?
     private static final byte OK = 0x01, FAIL = 0x00;
 
     private final Socket sock;
     private final ScheduledExecutorService sched;
     private final Path uploadsRoot;
+    // private final StatsCollector sc;
 
     public ClientHandler(Socket sock, ScheduledExecutorService sched, Path uploadsRoot) {
         this.sock = sock;
         this.sched = sched;
         this.uploadsRoot = uploadsRoot;
+    }
+
+    public void start() {
+
     }
 
     @Override public void run() {
@@ -32,16 +37,23 @@ public final class ClientHandler implements Runnable {
         AtomicBoolean printed = new AtomicBoolean(false);
         long startNs = System.nanoTime();
 
+        // sc.wroteInfo()
+        // ... handling
+        // sc.wroteInfo()
+        // sc.finished()
+        // sc.myConcurrentHashMap<>();
+
         try (Socket s = sock;
              DataInputStream in  = new DataInputStream(new BufferedInputStream(s.getInputStream(), BUF));
              DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream()))) {
 
             int magic = in.readInt();
-            if (magic != MAGIC) throw new IOException("bad magic");
+            if (magic != MAGIC) throw new IOException("bad magic"); // Business exception, not IO IllegalStateException, IllegalArgumentException
+            // We are not communication with os directly
             int nameLen = in.readInt();
-            if (nameLen <= 0 || nameLen > MAX_NAME_BYTES) throw new IOException("bad nameLen");
+            if (nameLen <= 0 || nameLen > MAX_NAME_BYTES) throw new IOException("bad nameLen"); // same as upper
             long fileSize = in.readLong();
-            if (fileSize < 0 || fileSize > MAX_FILE_SIZE) throw new IOException("bad fileSize");
+            if (fileSize < 0 || fileSize > MAX_FILE_SIZE) throw new IOException("bad fileSize"); // same as upper
 
             byte[] nameBytes = new byte[nameLen];
             in.readFully(nameBytes);
@@ -51,11 +63,11 @@ public final class ClientHandler implements Runnable {
             Path target = uploadsRoot.resolve(name).normalize();
 
             SpeedPrinter sp = new SpeedPrinter(clientId, rawName, total, last, startNs, fileSize, printed);
-            sched.scheduleAtFixedRate(sp, 3, 3, TimeUnit.SECONDS);
+            sched.scheduleAtFixedRate(sp, 3, 3, TimeUnit.SECONDS); // why not cleaning!!!!!
 
             boolean ok = false;
             try (OutputStream fout = Files.newOutputStream(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
-                byte[] buf = new byte[BUF];
+                byte[] buf = new byte[BUF]; // better use 1 buffer
                 long remain = fileSize;
                 while (remain > 0) {
                     int want = (int) Math.min(buf.length, remain);
@@ -67,8 +79,8 @@ public final class ClientHandler implements Runnable {
                 }
                 fout.flush();
                 ok = (total.get() == fileSize);
-            } catch (Throwable t) {
-                try { Files.deleteIfExists(target); } catch (IOException ignore) {}
+            } catch (Throwable t) { // StackOverflowError, OutOfMemoryError??????
+                try { Files.deleteIfExists(target); } catch (IOException ignore) {} // logging of exception????
                 throw t;
             } finally {
                 if (!printed.get()) sp.printNow();
@@ -77,9 +89,9 @@ public final class ClientHandler implements Runnable {
             out.writeByte(ok ? OK : FAIL);
             out.flush();
 
-            if (!ok) throw new IOException("size mismatch: got " + total.get() + " expected " + fileSize);
+            if (!ok) throw new IOException("size mismatch: got " + total.get() + " expected " + fileSize); // same as upper
 
-        } catch (Throwable e) {
+        } catch (Throwable e) { // OOM, StackOverflow
             System.err.println("[" + clientId + "] " + e.getMessage());
         }
     }

@@ -18,26 +18,24 @@ public class Client {
 
     public static void main(String[] args) throws IOException {
 
-        String host = "26.89.21.147";
+        String host = "10.163.123.205";
         int port = 5000;
-        Path uploads = Paths.get( "uploads").toAbsolutePath().normalize();
-        Files.createDirectories(uploads);
-        Path path = uploads.resolve(Paths.get("uploads", "123.mp4")).normalize();
+        Path path = Paths.get("C:\\Users\\PC\\IdeaProjects\\slab-2\\src\\uploads\\"+"123.mp4");
 
-        if (!Files.isRegularFile(path)) {
-            System.err.println("Not a file: " + path);
-            System.exit(3);
-        }
+//        if (!Files.isRegularFile(path)) {
+//            System.err.println("Not a file: " + path);
+//            System.exit(3);
+//        }
         long size = Files.size(path);
-        if (size < 0) {
-            System.err.println("Bad size");
-            System.exit(3);
-        }
+//        if (size < 0) {
+//            System.err.println("Bad size");
+//            System.exit(3);
+//        }
         byte[] nameBytes = path.getFileName().toString().getBytes(StandardCharsets.UTF_8);
-        if (nameBytes.length == 0 || nameBytes.length > MAX_NAME_BYTES) {
-            System.err.println("File name must be 1.." + MAX_NAME_BYTES + " bytes in UTF-8");
-            System.exit(3);
-        }
+//        if (nameBytes.length == 0 || nameBytes.length > MAX_NAME_BYTES) {
+//            System.err.println("File name must be 1.." + MAX_NAME_BYTES + " bytes in UTF-8");
+//            System.exit(3);
+//        }
         try (Socket s = new Socket(host, port);
              DataOutputStream out = new DataOutputStream(new BufferedOutputStream(s.getOutputStream(), BUFFER_LENGTH));
              DataInputStream in = new DataInputStream(new BufferedInputStream(s.getInputStream(), 8));
@@ -62,6 +60,7 @@ public class Client {
             int status = in.read();
             if (status == OK) {
                 System.out.println("OK: the transfer is successful");
+
             } else {
                 System.out.println("FAIL: the server reported an error");
                 System.exit(1);

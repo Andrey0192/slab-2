@@ -41,29 +41,38 @@ public class Server {
         });
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            // myAtomicStopVariable.set(true)
+            // ss.close()
             pool.shutdownNow();
             sched.shutdownNow();
         }));
     }
 
-    public void serve() throws IOException {
-        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("26.242.159.56"))) {
+    public void serve() throws IOException { // "0.0.0.0"
+        try (ServerSocket ss = new ServerSocket(port, BACKLOG, InetAddress.getByName("26.242.159.56"))) { // iface picking
             ss.setReuseAddress(true);
             System.out.println("Listening on " + ss.getInetAddress() + ":" + port + " -> " + uploads);
-            while (true) {
+            while (true) { // exiting out of while (true)????
                 Socket s = ss.accept();
                 s.setSoTimeout(SO_TIMEOUT_MS);
                 try {
+                    var c = new ClientHandler(...);
+
+                    pool.execute(c::start);
                     pool.execute(new ClientHandler(s, sched, uploads));
-                } catch (RejectedExecutionException rex) {
-                    try { s.close(); } catch (IOException ignore) {}
+                } catch (RejectedExecutionException rex) { // haram
+                    try { s.close(); } catch (IOException ignore) {} // better to print all exceptions
+                    // slf4j + logback (better)
+                    // java.util.Logger
                 }
             }
         }
     }
 
+    // gradle modules
+    // how much main functions????
     public static void main(String[] args) throws Exception {
-        int port = 5000;
+        int port = 5000; // hard coded???? not args????
         new Server(port).serve();
     }
 }
